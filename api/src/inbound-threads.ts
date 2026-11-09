@@ -8,6 +8,7 @@ import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages
 import { htmlToPlain, replyText } from './mailbox-store.js';
 import { archiveMailboxFiles, sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
 import { IdempotencyHeaders, idempotent } from './sending.js';
+import { SuppressionReason } from './core.js';
 
 const base = '/v1/inbound/threads';
 const tags = ['Inbound threads'];
@@ -23,7 +24,7 @@ const Thread = z.object({
 const Message = z.object({
   id: z.string(), threadId: z.string(), addressIds: z.array(z.string()), direction: z.enum(['inbound', 'outbound']), status: z.string(),
   from: Address, to: z.array(Address), cc: z.array(Address), replyTo: z.array(Address), subject: z.string(), snippet: z.string(),
-  text: z.string(), replyText: z.string(), receivedAt: z.string(), bodyTruncated: z.boolean(), attachmentCount: z.number().int(), read:z.boolean(), errorCode:z.string().nullable(),
+  text: z.string(), replyText: z.string(), receivedAt: z.string(), bodyTruncated: z.boolean(), attachmentCount: z.number().int(), read:z.boolean(), errorCode:z.string().nullable(), suppressionReason:SuppressionReason.nullable().optional(),
   emailId: z.string().nullable(), messageId: z.string().nullable().describe('RFC Message-ID, not the OpenSend message ID (id).'),
   inReplyTo: z.string().nullable(), references: z.array(z.string()),
 }).openapi('InboundMessage');
@@ -93,14 +94,14 @@ function messageWindow(db: DbExecutor, value: MailboxAccess, filter: Filter, lim
     .from(links).where(and(visibleLinks(value, filter), after ? sql`(${links.receivedAt}, ${links.messageId}) < (${after[0]}::timestamptz, ${after[1]})` : undefined))
     .groupBy(links.receivedAt, links.messageId).orderBy(desc(links.receivedAt), desc(links.messageId)).limit(limit).as('visible');
 }
-const metadataFields = { id: messages.id, threadId: messages.threadId, direction: messages.direction, status: messages.status,
+const metadataFields = { id: messages.id, threadId: messages.threadId, direction: messages.direction, status: messages.status, suppressionReason: messages.suppressionReason,
   subject: messages.subject, snippet: messages.snippet, receivedAt: messages.receivedAt, attachmentCount: messages.attachmentCount };
 const messageFields = { ...metadataFields, errorCode: messages.errorCode, fromName: messages.fromName, fromAddress: messages.fromAddress,
   to: messages.to, cc: messages.cc, replyTo: messages.replyTo, text: messages.text, html: messages.html, bodyTruncated: messages.bodyTruncated,
   sendingEmailId: messages.sendingEmailId, messageId: messages.messageId, inReplyTo: messages.inReplyTo, references: messages.references };
 function messageView(row: Pick<typeof messages.$inferSelect, keyof typeof messageFields>, addressIds: string[], read = true) {
   const text = row.text ?? (row.html ? htmlToPlain(row.html) : '');
-  return { id: row.id, threadId: row.threadId, addressIds, direction: row.direction, status: row.status, read, errorCode:row.errorCode,
+  return { id: row.id, threadId: row.threadId, addressIds, direction: row.direction, status: row.status, read, errorCode:row.errorCode, suppressionReason:row.suppressionReason,
     from: { name: row.fromName, address: row.fromAddress }, to: row.to, cc: row.cc, replyTo: row.replyTo, subject: row.subject, snippet: row.snippet,
     text, replyText: replyText(text), receivedAt: timestamp(row.receivedAt), bodyTruncated: row.bodyTruncated, attachmentCount: row.attachmentCount,
     emailId: row.sendingEmailId, messageId: row.messageId, inReplyTo: row.inReplyTo, references: row.references };
@@ -173,7 +174,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   const deliveryAddresses = (v:MailboxAccess,q:Filter) => sql<{id:string;address:string}[]>`coalesce((SELECT jsonb_agg(jsonb_build_object('id',a.id,'address',a.address) ORDER BY a.id)
       FROM mailbox_messages JOIN mailboxes a ON a.id=mailbox_messages.mailbox_id
       WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id), '[]'::jsonb)`;
-  const MessageListItem = Message.pick({ id:true, threadId:true, addressIds:true, direction:true, status:true, subject:true, snippet:true, receivedAt:true, attachmentCount:true, from:true }).extend(deliverySchema.partial().shape);
+  const MessageListItem = Message.pick({ id:true, threadId:true, addressIds:true, direction:true, status:true, suppressionReason:true, subject:true, snippet:true, receivedAt:true, attachmentCount:true, from:true }).extend(deliverySchema.partial().shape);
   app.openapi(createRoute({ method:'get', path:'/v1/inbound/messages', operationId:'listInboundMessages', tags, security, summary:'Search received and sent messages', description:'Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter.',
     request:{query:PageQuery.extend({ includeDelivery,region:z.string().max(40).optional(),threadId:Id.optional(),direction:z.enum(['inbound','outbound']).default('inbound'),q:z.string().trim().min(1).max(200).optional() })},responses:{200:response(page(MessageListItem).openapi('InboundMessagePage')),...errors} }), async c=>{
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),after=decodeCursor(q.cursor);

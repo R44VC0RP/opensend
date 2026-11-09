@@ -2154,6 +2154,13 @@
               "null"
             ]
           },
+          "suppressionReason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order."
+          },
           "scheduledAt": {
             "type": [
               "string",
@@ -2295,6 +2302,12 @@
           },
           "data": {
             "type": "object",
+            "properties": {
+              "suppressionReason": {
+                "type": "string",
+                "description": "Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order."
+              }
+            },
             "additionalProperties": {}
           }
         },
@@ -4990,6 +5003,12 @@
           },
           "data": {
             "type": "object",
+            "properties": {
+              "suppressionReason": {
+                "type": "string",
+                "description": "Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order."
+              }
+            },
             "additionalProperties": {}
           }
         },
@@ -7092,6 +7111,13 @@
               "null"
             ]
           },
+          "suppressionReason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order."
+          },
           "emailId": {
             "type": [
               "string",
@@ -7212,6 +7238,13 @@
                 },
                 "status": {
                   "type": "string"
+                },
+                "suppressionReason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order."
                 },
                 "subject": {
                   "type": "string"
@@ -7954,6 +7987,12 @@
           },
           "data": {
             "type": "object",
+            "properties": {
+              "suppressionReason": {
+                "type": "string",
+                "description": "Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order."
+              }
+            },
             "additionalProperties": {}
           },
           "addressId": {

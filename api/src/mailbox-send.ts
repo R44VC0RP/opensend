@@ -138,7 +138,15 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   if (recipients.length > 50) throw new ApiError(422, 'TOO_MANY_RECIPIENTS', 'At most 50 recipients across to, cc and bcc.', 'to');
   const own = await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, message.mailbox.id), inArray(mailboxAddresses.address, recipients.map(address => address.toLowerCase()))));
   if (own.length) throw new ApiError(422, 'SELF_SEND', `A mailbox cannot send to its own address (${own[0]!.address}).`, 'to');
-  const [current] = await tx.select().from(mailboxes).where(eq(mailboxes.id, message.mailbox.id)).for('no key update');
+  // Only a reply to an existing thread can carry this internal exemption. Snapshot its
+  // actual inbound authors, not Reply-To, copied recipients, or a caller's threading headers.
+  const [locked] = await tx.select({box:mailboxes,replyAuthors:message.threadId ? sql<string[]>`ARRAY(
+    SELECT DISTINCT m.from_address FROM mailbox_messages l JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=l.workspace_id
+    WHERE l.workspace_id=${message.scope.workspaceId} AND l.mailbox_id=${message.mailbox.id} AND l.thread_id=${message.threadId}
+      AND l.direction='inbound' AND NOT m.spam AND NOT ('unverified'=ANY(l.labels))
+      AND m.from_address=ANY(${sql.param(recipients.map(r=>r.toLowerCase()))}::text[]))` : sql<null>`NULL`
+  }).from(mailboxes).where(eq(mailboxes.id, message.mailbox.id)).for('no key update');
+  const current = locked?.box;
   if (!current) throw new ApiError(404, 'NOT_FOUND', 'Mailbox was not found.');
   message = { ...message, mailbox: current };
   if (current.expiresAt && Date.parse(current.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
@@ -166,7 +174,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
     ...message.headers.map(header => ({ Name: header.name, Value: header.value })),
   ];
   const fromName = message.fromName ?? message.mailbox.displayName;
-  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen });
+  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen }, locked.replyAuthors);
   const now = new Date().toISOString();
   let threadId = message.threadId;
   if (!threadId) { threadId = id('thr'); await tx.insert(mailThreads).values({ id: threadId, ...message.scope, subject: normalizeSubject(message.subject).slice(0, 998), messageCount: 0, lastMessageAt: now }); }
@@ -266,15 +274,15 @@ export function safeForwardHtml(html: string) {
 /** Copies delivery status and the SES Message-ID from the sending pipeline onto outbound mailbox messages and emits events. Every minute. */
 export async function syncOutboundMessages(runtime: Runtime, limit = 500) {
   const result=await runtime.db.execute<{n:number;queued:number}>(sql`WITH batch AS MATERIALIZED (
-    SELECT m.id,m.status AS previous,e.status,e.provider_id,e.error_code,e.region FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id AND e.workspace_id=m.workspace_id
+    SELECT m.id,m.status AS previous,e.status,e.provider_id,e.error_code,e.suppression_reason,e.region FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id AND e.workspace_id=m.workspace_id
     WHERE m.direction='outbound' AND m.status IN ('queued','attempting','accepted','sent','delayed','acceptance_unknown') AND (e.status<>m.status OR (e.provider_id IS NOT NULL AND m.message_id IS NULL)) ORDER BY m.created_at,m.id LIMIT ${limit} FOR UPDATE OF m SKIP LOCKED
-  ), changed AS (UPDATE mail_messages m SET status=b.status,error_code=b.error_code,message_id=coalesce(m.message_id,b.provider_id||'@'||CASE b.region WHEN 'us-east-1' THEN 'email' ELSE b.region END||'.amazonses.com'),ses_message_id=coalesce(m.ses_message_id,b.provider_id),updated_at=now() FROM batch b WHERE m.id=b.id RETURNING m.*,b.previous
+  ), changed AS (UPDATE mail_messages m SET status=b.status,error_code=b.error_code,suppression_reason=b.suppression_reason,message_id=coalesce(m.message_id,b.provider_id||'@'||CASE b.region WHEN 'us-east-1' THEN 'email' ELSE b.region END||'.amazonses.com'),ses_message_id=coalesce(m.ses_message_id,b.provider_id),updated_at=now() FROM batch b WHERE m.id=b.id RETURNING m.*,b.previous
   ), ids AS (INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) SELECT workspace_id,message_id,id,thread_id FROM changed WHERE message_id IS NOT NULL ON CONFLICT DO NOTHING
   ), updates AS (SELECT c.*,e.type,e.ord FROM changed c CROSS JOIN LATERAL (VALUES
     (CASE WHEN previous IN ('queued','attempting','acceptance_unknown') AND status IN ('delivered','bounced','complained') THEN 'message.sent' END,1),
     (CASE WHEN status IN ('accepted','sent') THEN 'message.sent' WHEN status IN ('delivered','bounced','complained','delayed') THEN 'message.'||status WHEN status IN ('rejected','rendering_failed','suppressed','canceled') THEN 'message.failed' END,2)) e(type,ord)
     WHERE c.sender_mailbox_id IS NOT NULL AND c.status<>c.previous AND e.type IS NOT NULL
-  ), ${mailboxEventCtes(sql`SELECT workspace_id,type,sender_mailbox_id AS mailbox_id,thread_id,id AS message_id,row_number() OVER(ORDER BY id,ord) AS ord,jsonb_strip_nulls(jsonb_build_object('subject',subject,'status',CASE WHEN ord=2 THEN status END,'errorCode',CASE WHEN ord=2 THEN error_code END)) AS data FROM updates`)}
+  ), ${mailboxEventCtes(sql`SELECT workspace_id,type,sender_mailbox_id AS mailbox_id,thread_id,id AS message_id,row_number() OVER(ORDER BY id,ord) AS ord,jsonb_strip_nulls(jsonb_build_object('subject',subject,'status',CASE WHEN ord=2 THEN status END,'errorCode',CASE WHEN ord=2 THEN error_code END,'suppressionReason',CASE WHEN ord=2 THEN suppression_reason END)) AS data FROM updates`)}
   SELECT (SELECT count(*)::int FROM changed) AS n,(SELECT count(*)::int FROM queued) AS queued`);
   const {n,queued}=result.rows[0]!;
   if (queued) try { await runtime.wake?.(queued); } catch { /* Webhook jobs are durable. */ }

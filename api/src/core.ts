@@ -8,6 +8,8 @@ import { sql } from 'drizzle-orm';
 import { workspaceCredentials, type ReadyConnection } from './provider-credentials.js';
 
 export type Database = NodePgDatabase;
+export const SuppressionReason = z.string().describe('Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.');
+export const SuppressionEventData = z.object({suppressionReason:SuppressionReason.optional()}).catchall(z.unknown());
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {

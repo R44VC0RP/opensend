@@ -75,7 +75,7 @@ export const mailMessages = pgTable('mail_messages', {
   headers: jsonb('headers').$type<MailHeader[]>().notNull().default([]), attachmentCount: integer('attachment_count').notNull().default(0), sizeBytes: integer('size_bytes'),
   rawBucket: text('raw_bucket'), rawKey: text('raw_key'), verdicts: jsonb('verdicts').$type<Verdicts>().notNull().default({}),
   spam: boolean('spam').notNull().default(false), automated: boolean('automated').notNull().default(false), status: text('status').notNull().default('received'),
-  senderMailboxId: text('sender_mailbox_id'), errorCode: text('error_code'),
+  senderMailboxId: text('sender_mailbox_id'), errorCode: text('error_code'), suppressionReason: text('suppression_reason'),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 }, t => [index('mail_messages_tenant_page').on(t.workspaceId, t.direction, t.receivedAt.desc(), t.id.desc())]);
 

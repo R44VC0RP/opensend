@@ -11,7 +11,8 @@ import { claimedWithWebhooks, enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseF
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
 import { recordUnsubscribe } from './audience.js';
-import { contacts } from './db/audience.js';
+import { contacts, mergeSuppression } from './db/audience.js';
+import { SuppressionEventData } from './core.js';
 import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
@@ -38,7 +39,7 @@ export type { PublishedEvent } from './db/operations.js';
 
 const now = () => new Date().toISOString();
 const scoped = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
-const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), region: z.string().nullable(), data: z.record(z.string(), z.unknown()) }).openapi('Event');
+const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), region: z.string().nullable(), data: SuppressionEventData }).openapi('Event');
 const reservedHeader = /^(?:host|content-length|content-type|content-encoding|transfer-encoding|connection|keep-alive|te|trailer|upgrade|http2-settings|expect|cookie|user-agent|webhook-id|webhook-timestamp|webhook-signature|opensend-test)$|^proxy-/i;
 export const WebhookHeaders = z.array(z.object({
   name: z.string().min(1).max(64).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/).refine(name => !reservedHeader.test(name), 'Reserved webhook header.'),
@@ -1148,7 +1149,7 @@ function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress 
   const engagement = kind === 'Open' || kind === 'Click';
   const reported = kind === 'Bounce' ? detail.bouncedRecipients : kind === 'Complaint' ? detail.complainedRecipients : undefined;
   return { type: extended ? validation ? 'validation_suppressed' : sesEvents[kind]!.rawType : type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`,
-    data: { providerId, ...(engagement ? { isBotEvent: detail.isBotEvent ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof detail.link === 'string' ? { link: detail.link } : {}),
+    data: { providerId, ...(validation ? {suppressionReason:'email_validation'} : {}), ...(engagement ? { isBotEvent: detail.isBotEvent ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof detail.link === 'string' ? { link: detail.link } : {}),
       ...(kind === 'Bounce' ? { bounceType: detail.bounceType ?? 'Unknown', bounceSubType: detail.bounceSubType ?? 'Unknown' } : {}) },
     ...(extended ? { effects: { reported: Array.isArray(reported) && reported.length ? reported.map(r => typeof r?.emailAddress === 'string' ? r.emailAddress.toLowerCase() : null) : null,
       suppress: kind === 'Complaint' ? 'complaint' : kind === 'Bounce' && detail.bounceType === 'Permanent' ? validation ? 'email_validation' : 'hard_bounce' : null,
@@ -1244,6 +1245,7 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   // SES Auto Validation drops risky recipients before sending and reports each as a Permanent bounce with this subtype.
   // It never left SES, so record it as suppressed (not bounced); the contact is still suppressed below.
   const validationSuppressed = kind === 'Bounce' && eventDetail.bounceSubType === 'EmailValidationSuppressed';
+  if (validationSuppressed) normalized.data.suppressionReason='email_validation';
   const candidates: unknown[] = kind === 'Bounce' ? (data.bounce?.bouncedRecipients ?? []).map((r: any) => r.emailAddress) : kind === 'Complaint' ? (data.complaint?.complainedRecipients ?? []).map((r: any) => r.emailAddress) : (email.to.length === 1 && !email.cc.length && !email.bcc.length ? email.to : []);
   const envelope = new Set([...email.to,...email.cc,...email.bcc].map(v => v.toLowerCase()));
   const recipients = [...new Set(candidates.filter((v): v is string => typeof v === 'string').map(v => v.toLowerCase()).filter(v => envelope.has(v)))];
@@ -1264,9 +1266,9 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
       const contactWhere = and(scoped(contacts, job), eq(contacts.email, address));
       if (suppress) {
         const suppressionReason = kind === 'Complaint' ? 'complaint' : validationSuppressed ? 'email_validation' : 'hard_bounce';
-        await tx.execute(sql`INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason)
-          VALUES (${id('con')},${job.workspaceId},${address},true,${suppressionReason}) ON CONFLICT ON CONSTRAINT audience_contacts_email_scope
-          DO UPDATE SET suppressed=true,suppression_reason=excluded.suppression_reason,updated_at=now()`);
+        await tx.execute(sql`INSERT INTO audience_contacts AS c(id,workspace_id,email,suppressed,suppression_reason,suppressed_at)
+          VALUES (${id('con')},${job.workspaceId},${address},true,${suppressionReason},${eventTime}) ON CONFLICT ON CONSTRAINT audience_contacts_email_scope
+          DO UPDATE SET ${mergeSuppression},updated_at=now()`);
       } else if (observeEngagement) {
         const column = kind === 'Open' ? contacts.lastOpenAt : contacts.lastClickAt;
         const observed = kind === 'Open' ? contacts.openObservedSince : contacts.clickObservedSince;

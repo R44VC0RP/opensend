@@ -4,6 +4,8 @@ import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNul
 import { Buffer } from 'node:buffer';
 import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
+import { mergeSuppression } from './db/audience.js';
+import { SuppressionReason, SuppressionEventData } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { GetEmailTemplateCommand, TestRenderEmailTemplateCommand, type Attachment } from '@aws-sdk/client-sesv2';
 import { actor, ApiError, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
@@ -118,11 +120,11 @@ const ReplyAddressId = z.string().min(1).max(120).optional();
 const SingleSendInput = SendInput.safeExtend({ replyAddressId: ReplyAddressId.describe('Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted manage permission; From and Reply-To must belong to the address.'), replyMailboxId: ReplyAddressId.openapi({ deprecated: true, description: 'Legacy spelling of replyAddressId.' }) }).refine(v => !(v.replyAddressId && v.replyMailboxId), { path: ['replyAddressId'], message: 'Supply only one reply address ID.' }).openapi('SendEmailInput');
 const BatchInput = z.object({ emails: z.array(SendInput).min(1).max(100) }).strict().openapi('SendEmailBatchInput');
 const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
-const Email = z.object({ id: z.string(), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
+const Email = z.object({ id: z.string(), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), suppressionReason: SuppressionReason.nullable().optional(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
 const Receipt = z.object({ id: z.string(), status: z.literal('queued'), simulated: z.boolean() }).openapi('EmailQueued');
 const SingleReceipt = z.object({ ...Receipt.shape, inboundMessageId: z.string().optional(), mailboxMessageId: z.string().optional().openapi({ deprecated: true, description: 'Legacy alias for inboundMessageId.' }), threadId: z.string().optional() }).describe('For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.').openapi('SingleEmailQueued');
 const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQueued');
-const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), createdAt: z.string(), data: z.record(z.string(), z.unknown()) }).openapi('EmailEvent');
+const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), createdAt: z.string(), data: SuppressionEventData }).openapi('EmailEvent');
 const EmailContent = z.object({ subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
 const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), disposition: z.enum(['attachment', 'inline']), contentId: z.string().nullable(), createdAt: z.string() }).openapi('Attachment');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
@@ -184,7 +186,7 @@ const emailColumns = {
   from: emails.from, fromName: sql<string | null>`${emails.snapshot}->>'fromName'`, kind: sql<'transactional' | 'marketing'>`${emails.snapshot}->>'kind'`,
   to: emails.to, cc: emails.cc, bcc: emails.bcc, subject: emails.subject, status: emails.status,
   providerId: emails.providerId, simulated: emails.simulated, attemptStartedAt: emails.attemptStartedAt,
-  errorCode: emails.errorCode, scheduledAt: emails.scheduledAt, createdAt: emails.createdAt, updatedAt: emails.updatedAt,
+  errorCode: emails.errorCode, suppressionReason: emails.suppressionReason, scheduledAt: emails.scheduledAt, createdAt: emails.createdAt, updatedAt: emails.updatedAt,
 };
 function emailView(row: z.input<typeof Email>) { return Email.parse(row); }
 // Draft sync polling reads only state columns, without materializing drafts or aggregating email counts.
@@ -864,13 +866,14 @@ export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'work
 }
 export type MailboxSendRequest = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; headers: { Name: string; Value: string }[] };
 /** Queues one transactional email through the normal pipeline (admission, region readiness, suppression, dispatch) with extra MIME headers. */
-export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Actor, request: MailboxSendRequest) {
+export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
   const parsed = SendInput.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.to, cc: request.cc, bcc: request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
   for (const header of request.headers) if (!/^[!-9;-~]{1,126}$/.test(header.Name) || !/^[ -~]{1,995}$/.test(header.Value) || header.Name.length + header.Value.length > 996) throw new ApiError(422, 'INVALID_MIME_HEADER', `Header ${header.Name} is not a valid single-line ASCII header.`);
   await checkPending(runtime, db, a, hostedCost(request.to, request.cc, request.bcc));
   const snapshot = await prepare(runtime, db, a, parsed.data);
   snapshot.headers = [...snapshot.headers, ...request.headers];
+  if (replyAuthors !== null) snapshot.replyAuthors = replyAuthors;
   const receipt = await queueEmail(runtime, db, a, snapshot);
   return { emailId: receipt.id, snapshot };
 }
@@ -1427,15 +1430,16 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ), contact_changes AS (
       -- One write per address. A missing contact starts existing at its first suppression;
       -- an earlier open must not create it or retroactively contribute engagement.
-      INSERT INTO audience_contacts AS c(id,workspace_id,email,suppressed,suppression_reason,last_open_at,last_click_at,open_observed_since,click_observed_since,observed_since)
+      INSERT INTO audience_contacts AS c(id,workspace_id,email,suppressed,suppression_reason,suppressed_at,last_open_at,last_click_at,open_observed_since,click_observed_since,observed_since)
       SELECT 'con_'||replace(gen_random_uuid()::text,'-',''),v.workspace_id,v.address,bool_or(reason IS NOT NULL),
-        (array_agg(reason ORDER BY ordinal DESC) FILTER (WHERE reason IS NOT NULL))[1],
+        (array_agg(reason ORDER BY (reason='complaint') DESC,(reason='hard_bounce') DESC,ordinal DESC) FILTER (WHERE reason IS NOT NULL))[1],
+        max(event_time) FILTER (WHERE reason IS NOT NULL),
         max(event_time) FILTER (WHERE observe='open'),max(event_time) FILTER (WHERE observe='click'),
         min(event_time) FILTER (WHERE observe='open'),min(event_time) FILTER (WHERE observe='click'),min(event_time) FILTER (WHERE observe IS NOT NULL)
       FROM contact_events v LEFT JOIN audience_contacts c ON c.workspace_id=v.workspace_id AND c.email=v.address
       WHERE (reason IS NOT NULL OR observe IS NOT NULL) AND (c.id IS NOT NULL OR ordinal>=first_suppression)
       GROUP BY v.workspace_id,v.address ORDER BY v.workspace_id,v.address ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET
-        suppressed=c.suppressed OR excluded.suppressed,suppression_reason=coalesce(excluded.suppression_reason,c.suppression_reason),
+        ${mergeSuppression},
         last_open_at=greatest(c.last_open_at,excluded.last_open_at),last_click_at=greatest(c.last_click_at,excluded.last_click_at),
         open_observed_since=least(c.open_observed_since,excluded.open_observed_since),click_observed_since=least(c.click_observed_since,excluded.click_observed_since),
         observed_since=least(c.observed_since,excluded.observed_since),updated_at=now()
@@ -1446,7 +1450,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
       SELECT DISTINCT ON (email_id) *,bool_or(type='validation_suppressed' AND next_rank>=greatest(running_rank,(${JSON.stringify(rank)}::jsonb->>status)::int)) OVER(PARTITION BY email_id) AS validation
       FROM ranked ORDER BY email_id,next_rank DESC,ordinal DESC
     ), updated AS (
-      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), error_code=CASE WHEN w.validation THEN 'EMAIL_VALIDATION_SUPPRESSED' ELSE e.error_code END, updated_at = clock_timestamp()
+      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), error_code=CASE WHEN w.validation THEN 'EMAIL_VALIDATION_SUPPRESSED' ELSE e.error_code END, suppression_reason=CASE WHEN w.next_status='suppressed' AND w.validation THEN 'email_validation' END, updated_at = clock_timestamp()
        FROM winner w WHERE e.id = w.email_id AND e.workspace_id = w.workspace_id AND w.next_rank >= (${JSON.stringify(rank)}::jsonb ->> w.status)::int
     ), published AS (
       INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
@@ -1487,7 +1491,7 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
       ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, mail.simulated, ${input.createdAt ?? now()}::timestamptz, ${sql.param(input.recipientHashes ?? null)}::text[]
     FROM mail ON CONFLICT DO NOTHING RETURNING *
   ), updated AS (
-    UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id), error_code = coalesce(${input.errorCode ?? null}::text, e.error_code), updated_at = clock_timestamp()
+    UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id), error_code = coalesce(${input.errorCode ?? null}::text, e.error_code), suppression_reason=${input.type==='validation_suppressed'?'email_validation':null}, updated_at = clock_timestamp()
     FROM mail, inserted WHERE e.id = mail.id AND e.workspace_id = ${input.workspaceId}
       AND ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int
   ), published AS (

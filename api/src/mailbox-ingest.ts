@@ -9,7 +9,7 @@ import { JobDeferred, MAX_ATTEMPTS } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents } from './mailbox-events.js';
 import { mailboxS3, STAGING_PREFIX, workspacePrefix, refreshMailboxDns, storageBinding } from './mailbox-setup.js';
-import { messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
+import { ADDRESS, messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import { claimReceives, connectionReady, poolReceives } from './states.js';
 
 const PARSE_LIMIT = 6 * 1024 * 1024; // Larger or line-heavy messages keep headers and raw MIME only (Worker memory).
@@ -74,6 +74,45 @@ export async function acceptInboundNotification(runtime: Runtime, input: { topic
 const flatten = (list: Address[] | Address | undefined): MailAddress[] => (Array.isArray(list) ? list : list ? [list] : []).flatMap(item => item.group ? item.group : [item])
   .filter(item => typeof item.address === 'string' && item.address.includes('@')).map(item => ({ name: item.name?.trim() || null, address: item.address!.trim().toLowerCase() }));
 const verdict = (value: { status?: string } | undefined) => typeof value?.status === 'string' ? value.status : undefined;
+function authenticatedFrom(email: Email | null, address: string, mail: ReceivedNotification['mail'], verdicts: Verdicts) {
+  const dmarcPass = verdicts.dmarc === 'PASS', noDmarc = verdicts.dmarc === undefined || verdicts.dmarc === 'GRAY';
+  if (!dmarcPass && !(noDmarc && verdicts.dkim === 'PASS')) return false;
+  // DKIM signs the bottommost occurrence; the MIME parser reads the first Date. Reject ambiguity.
+  if (!email || !ADDRESS.test(address) || email.headers.filter(h => h.key === 'date').length !== 1) return false;
+  const from = email.headers.filter(h => h.key === 'from');
+  const sesFrom = mail?.commonHeaders?.from;
+  const matches = (value: string) => {
+    if (!withinFieldLimit(value)) return false;
+    // The display parser recovers addresses from malformed text (even multiple angle addresses).
+    // Identity evidence must instead be one literal addr-spec, optionally with a display name.
+    const field = value.trim().toLowerCase(), angle = `<${address}>`;
+    if (field === address) return true;
+    if (!field.endsWith(angle)) return false;
+    const display = field.slice(0,-angle.length).trim();
+    return !/[()<>@,;:\\"\[\]\x00-\x1f]/.test(display) || /^"(?:[^"\\\r\n]|\\[^\r\n])*"$/.test(display);
+  };
+  if (from.length !== 1 || !matches(from[0]!.value) || (sesFrom && (sesFrom.length !== 1 || !matches(sesFrom[0]!)))) return false;
+  const signatures = email.headers.filter(h => h.key === 'dkim-signature');
+  const domain = address.split('@')[1];
+  // DMARC through SPF authenticates this delivery. If it could instead be a replay of a
+  // passing DKIM signature, do not trust an unsigned Date even when DMARC passed.
+  const envelope = mail?.source?.toLowerCase();
+  const failedDkim = verdicts.dkim === 'FAIL' || verdicts.dkim === 'GRAY';
+  const alignedSpf = verdicts.spf === 'PASS' && (failedDkim || (envelope && ADDRESS.test(envelope) && envelope.split('@')[1] === domain));
+  if (dmarcPass && (alignedSpf || (!signatures.length && verdicts.dkim !== 'PASS'))) return true;
+  // SES doesn't identify the passing signature. With DMARC, require every candidate to
+  // cover the date. Without DMARC, only a sole, strictly aligned signature is attributable.
+  if (!signatures.length || (!dmarcPass && signatures.length !== 1)) return false;
+  return signatures.every(({value}) => {
+    if (!withinFieldLimit(value)) return false;
+    const tags = value.split(';').map(tag => tag.trim());
+    const signed = tags.filter(tag => /^h\s*=/i.test(tag));
+    const headers = signed.length === 1 && /^h[ \t]*=[ \t]*(.+)$/.exec(signed[0]!)?.[1]?.toLowerCase().split(':').map(name => name.trim());
+    if (!headers || !headers.includes('from') || !headers.includes('date')) return false;
+    const domains = tags.filter(tag => /^d\s*=/i.test(tag));
+    return dmarcPass || (domains.length === 1 && /^d[ \t]*=[ \t]*([^\s]+)$/.exec(domains[0]!)?.[1]?.toLowerCase() === domain);
+  });
+}
 const cap = (value: string | undefined | null) => value && value.length > BODY_LIMIT ? { value: value.slice(0, BODY_LIMIT), truncated: true } : { value: value ?? null, truncated: false };
 function headersOf(email: Email | null): MailHeader[] {
   const out: MailHeader[] = []; let size = 0;
@@ -372,6 +411,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   const text = cap(email?.text), html = cap(email?.html);
   const sesTimestamp = [notification.receipt?.timestamp, notification.mail?.timestamp].find(value => value && Number.isFinite(Date.parse(value)));
   const receivedAt = sesTimestamp ? new Date(sesTimestamp).toISOString() : receipt.createdAt;
+  const verifiedFrom = !!sesTimestamp && authenticatedFrom(email, from.address, notification.mail, verdicts);
   const sentAt = email?.date && Number.isFinite(Date.parse(email.date)) ? new Date(email.date).toISOString() : null;
 
   // Attachments are uploaded before the database commit with deterministic keys, so retries overwrite rather than duplicate.
@@ -405,7 +445,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
         headers: headersOf(email), attachmentCount: attachments.length, sizeBytes: raw.byteLength, rawBucket: receipt.bucket, rawKey,
         verdicts, spam, automated: automated(email, raw, from.address), status,
-      },attachments);
+      },attachments,verifiedFrom);
   });
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED', status, bytes: raw.byteLength, attachments: attachments.length });
   if (runnable > 0) try { await runtime.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }

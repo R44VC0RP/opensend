@@ -1,6 +1,7 @@
 import { getTableColumns, sql } from 'drizzle-orm';
 import { id,type DbExecutor } from './core.js';
 import { mailMessages,mailAttachments } from './db/mailbox.js';
+import { reversibleReasons } from './db/audience.js';
 import { mailboxEventCtes } from './mailbox-events.js';
 import { ADDRESS,normalizeSubject,threadSummaryConflict } from './mailbox-store.js';
 
@@ -9,7 +10,7 @@ type Incoming=Omit<typeof mailMessages.$inferInsert,'threadId'> & {receivedAt:st
 /** The caller has locked this workspace's ingest and address lanes in a preceding statement.
  * Its READ COMMITTED snapshot now sees the previous writer. Each modifying CTE consumes RETURNING
  * rows (not a reread of a table modified by a sibling). All AWS I/O precedes this transaction. */
-export async function storeIncoming(tx:DbExecutor,m:Incoming,files:(typeof mailAttachments.$inferInsert)[]) {
+export async function storeIncoming(tx:DbExecutor,m:Incoming,files:(typeof mailAttachments.$inferInsert)[], verifiedFrom:boolean) {
   const columns=getTableColumns(mailMessages);
   const fields=Object.entries(m).filter(([,value])=>value!==undefined).map(([key,value])=>[columns[key as keyof typeof columns].name,value] as const);
   const names=fields.map(([name])=>sql.identifier(name));
@@ -37,6 +38,13 @@ export async function storeIncoming(tx:DbExecutor,m:Incoming,files:(typeof mailA
       WHERE coalesce(i.thread_id,provider.thread_id) IS NOT NULL ORDER BY n LIMIT 1) parent ON true
     WHERE NOT EXISTS(SELECT 1 FROM known) ON CONFLICT(id) DO UPDATE SET message_count=t.message_count+1,last_message_at=greatest(t.last_message_at,excluded.last_message_at) RETURNING id
   ), stored AS (INSERT INTO mail_messages(${sql.join(names,sql`,`)},thread_id) SELECT ${sql.join(names.map(name=>sql`x.${name}`),sql`,`)},thread.id FROM input x,thread RETURNING *
+  ), stale AS MATERIALIZED (
+    SELECT c.id,c.suppression_reason,s.id AS message_id FROM stored s JOIN audience_contacts c ON c.workspace_id=s.workspace_id AND c.email=s.from_address
+    WHERE ${verifiedFrom} AND NOT s.spam AND c.suppressed AND c.suppression_reason IN ${reversibleReasons} AND c.marketing_consent<>'unsubscribed'
+      AND s.sent_at IS NOT NULL AND s.sent_at<=s.received_at+interval '5 minutes'
+      AND coalesce(c.suppressed_at,c.updated_at)<least(s.sent_at,s.received_at) FOR UPDATE OF c
+  ), cleared AS (UPDATE audience_contacts c SET suppressed=false,suppression_reason=NULL,suppressed_at=NULL,updated_at=now() FROM stale
+    WHERE c.id=stale.id RETURNING c.id AS contact_id,stale.suppression_reason,stale.message_id
   ), files AS (INSERT INTO mail_attachments(id,workspace_id,message_id,filename,content_type,size_bytes,content_id,disposition,sha256,bucket,storage_key)
     SELECT f.id,s.workspace_id,s.id,f.filename,f."contentType",f."sizeBytes",f."contentId",f.disposition,f.sha256,f.bucket,f."storageKey" FROM stored s CROSS JOIN jsonb_to_recordset(${JSON.stringify(files)}::jsonb) f(id text,filename text,"contentType" text,"sizeBytes" int,"contentId" text,disposition text,sha256 text,bucket text,"storageKey" text)
   ), indexed AS (INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) SELECT workspace_id,message_id,id,thread_id FROM stored WHERE message_id IS NOT NULL ON CONFLICT DO NOTHING
@@ -62,7 +70,7 @@ export async function storeIncoming(tx:DbExecutor,m:Incoming,files:(typeof mailA
   summaries AS (INSERT INTO mailbox_threads AS t(mailbox_id,thread_id,workspace_id,subject,snippet,participants,message_count,unread_count,last_message_at,last_inbound_at,spam,labels)
     SELECT a.mailbox_id,x.thread_id,x.workspace_id,x.subject,x.snippet,(SELECT coalesce(jsonb_agg(p ORDER BY n),'[]') FROM (SELECT * FROM (SELECT DISTINCT ON(lower(p->>'address')) p,n FROM jsonb_array_elements(jsonb_build_array(jsonb_build_object('name',x.from_name,'address',x.from_address))||x."to"||x.cc) WITH ORDINALITY v(p,n) WHERE p->>'address'<>'' ORDER BY lower(p->>'address'),n) first_seen ORDER BY n LIMIT 20) limited),1,1,x.received_at,x.received_at,x.spam,CASE WHEN x.spam THEN ARRAY['spam'] ELSE ARRAY[]::text[] END FROM target x JOIN added a ON a.message_id=x.id ORDER BY a.mailbox_id ${threadSummaryConflict} RETURNING mailbox_id),
   done AS (UPDATE mail_receipts SET status='processed',processed_at=now(),error=NULL WHERE workspace_id=${m.workspaceId} AND ses_message_id=${m.sesMessageId} AND status='pending'),
-  ${mailboxEventCtes(sql`SELECT workspace_id,'message.stored' AS type,NULL::text AS mailbox_id,thread_id,id AS message_id,'{}'::jsonb AS data,1 AS ord FROM stored
+  ${mailboxEventCtes(sql`SELECT workspace_id,'message.stored' AS type,NULL::text AS mailbox_id,thread_id,id AS message_id,jsonb_strip_nulls(jsonb_build_object('contactId',c.contact_id,'clearedSuppressionReason',c.suppression_reason)) AS data,1 AS ord FROM stored s LEFT JOIN cleared c ON c.message_id=s.id
     UNION ALL SELECT workspace_id,'address.created',id,NULL,NULL,'{"origin":"auto"}'::jsonb,2 FROM boxes
     UNION ALL SELECT x.workspace_id,'message.received',a.mailbox_id,x.thread_id,x.id,jsonb_build_object('from',jsonb_build_object('name',x.from_name,'address',x.from_address),'subject',x.subject,'snippet',x.snippet,'attachmentCount',x.attachment_count,'spam',x.spam,'automated',x.automated,'dmarc',${dmarc}::text),3
     FROM target x JOIN added a ON a.message_id=x.id JOIN summaries s ON s.mailbox_id=a.mailbox_id WHERE NOT ('unverified'=ANY(a.labels))`)} SELECT count(*)::int AS n FROM queued`);

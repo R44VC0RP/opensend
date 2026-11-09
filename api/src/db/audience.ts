@@ -1,8 +1,17 @@
+import { sql } from 'drizzle-orm';
 import { boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique } from 'drizzle-orm/pg-core';
 
 export type SegmentRule = { field: 'email' | 'firstName' | 'plan' | 'country'; operator: 'eq' | 'neq' | 'contains'; value: string } | { field: 'lastOpenAt' | 'lastClickAt'; operator: 'within' | 'inactive'; days: number } | { operator: 'and' | 'or'; rules: SegmentRule[] };
 export type ImportRow = { row: number; email: string; name?: string; properties: Record<string, string | number | boolean | null> };
 export type ImportError = { row: number; field: string; message: string };
+// Both SES feedback paths use the same precedence. Never downgrade an operator/complaint
+// suppression to one a reply could bypass, or a delivery bounce to validation alone.
+export const reversibleReasons = sql`('hard_bounce','soft_bounce','transient','email_validation')`;
+export const mergeSuppression = sql`suppressed=c.suppressed OR excluded.suppressed,
+  suppression_reason=CASE WHEN NOT c.suppressed THEN excluded.suppression_reason
+    WHEN excluded.suppression_reason IS NULL OR c.suppression_reason IS NULL OR c.suppression_reason NOT IN ${reversibleReasons} THEN c.suppression_reason
+    WHEN excluded.suppression_reason='email_validation' THEN c.suppression_reason ELSE excluded.suppression_reason END,
+  suppressed_at=greatest(CASE WHEN c.suppressed THEN coalesce(c.suppressed_at,c.updated_at) END,excluded.suppressed_at)`;
 export type AudienceOperation = { kind: 'update_contacts'; targets: { id: string; email: string; updatedAt: string; consent: 'unknown' | 'subscribed' | 'unsubscribed' }[]; set: { name?: string | null; consent?: 'subscribed' | 'unsubscribed'; properties?: Record<string, string | number | boolean | null> } } | { kind: 'add_to_list' | 'remove_from_list'; targetIds: string[]; listId: string };
 const scope = () => ({ workspaceId: text('workspace_id').notNull() });
 const dates = () => ({ createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(), updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow() });

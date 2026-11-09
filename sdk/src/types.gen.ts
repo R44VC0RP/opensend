@@ -491,6 +491,10 @@ export type Email = {
     simulated: boolean;
     attemptStartedAt: string | null;
     errorCode: string | null;
+    /**
+     * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
+     */
+    suppressionReason?: string | null;
     scheduledAt: string | null;
     createdAt: string;
     updatedAt: string;
@@ -521,6 +525,10 @@ export type EmailEvent = {
     simulated: boolean;
     createdAt: string;
     data: {
+        /**
+         * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
+         */
+        suppressionReason?: string;
         [key: string]: unknown;
     };
 };
@@ -1263,6 +1271,10 @@ export type Event = {
     workspaceId: string;
     region: string | null;
     data: {
+        /**
+         * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
+         */
+        suppressionReason?: string;
         [key: string]: unknown;
     };
 };
@@ -1803,6 +1815,10 @@ export type InboundMessage = {
     attachmentCount: number;
     read: boolean;
     errorCode: string | null;
+    /**
+     * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
+     */
+    suppressionReason?: string | null;
     emailId: string | null;
     /**
      * RFC Message-ID, not the OpenSend message ID (id).
@@ -1829,6 +1845,10 @@ export type InboundMessagePage = {
         addressIds: Array<string>;
         direction: 'inbound' | 'outbound';
         status: string;
+        /**
+         * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
+         */
+        suppressionReason?: string | null;
         subject: string;
         snippet: string;
         receivedAt: string;
@@ -2029,6 +2049,10 @@ export type InboundEvent = {
     threadId: string | null;
     messageId: string | null;
     data: {
+        /**
+         * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
+         */
+        suppressionReason?: string;
         [key: string]: unknown;
     };
     /**

@@ -3980,10 +3980,10 @@ describe('Operational configuration and public event boundaries', () => {
     assert.equal(event.data.bounceType, 'Permanent');
     assert.equal(event.data.bounceSubType, 'EmailValidationSuppressed');
     // It never left SES: the email is suppressed, not bounced, and carries no bounced (or accepted) metrics outcome.
-    const suppressed = (await db.query('SELECT status, error_code, event_outcomes FROM sending_emails WHERE id=$1', [emailId])).rows[0];
-    assert.deepEqual(suppressed, { status: 'suppressed', error_code: 'EMAIL_VALIDATION_SUPPRESSED', event_outcomes: 0 });
+    const suppressed = (await db.query('SELECT status, error_code, suppression_reason, event_outcomes FROM sending_emails WHERE id=$1', [emailId])).rows[0];
+    assert.deepEqual(suppressed, { status: 'suppressed', error_code: 'EMAIL_VALIDATION_SUPPRESSED', suppression_reason:'email_validation', event_outcomes: 0 });
     const published = (await db.query("SELECT type, data FROM operation_events WHERE workspace_id=$1 AND data->>'emailId'=$2", [runtime.config.workspaceId, emailId])).rows;
-    assert.deepEqual(published.map(row => [row.type, row.data.bounceSubType]), [['email.bounced', 'EmailValidationSuppressed']]);
+    assert.deepEqual(published.map(row => [row.type, row.data.bounceSubType, row.data.suppressionReason]), [['email.bounced', 'EmailValidationSuppressed', 'email_validation']]);
 
     // A real permanent bounce keeps its existing representation.
     await operationJobs['operation.ses']!(runtime, { topicArn, messageId: bouncedMessageId, region: REGION, message: {
@@ -6034,9 +6034,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const boxHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/support', addressIds: [box.id], eventTypes: ['message.received'] }), 201);
       const raw = new Map<string,string>();
       t.mock.method(S3Client.prototype,'send', async (cmd: any) => { if(cmd.constructor.name==='HeadObjectCommand') return {ContentLength:Buffer.byteLength(raw.get(cmd.input.Key)!),ETag:'"fixture"'};if(cmd.constructor.name==='CopyObjectCommand') return {};if(cmd.constructor.name==='PutObjectCommand') {assert.doesNotMatch(Buffer.from(cmd.input.Body).toString(),/^bcc:/im);return {};}assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
-      async function receive(to: string | string[], mime: string, dmarc = 'PASS') {
+      async function receive(to: string | string[], mime: string, dmarc: string | null = 'PASS', dkim?: string, timestamp = new Date().toISOString(), verdicts:{spam?:string;spf?:string}={}) {
         const receipt = unique('receipt'), objectKey = `raw/${receipt}`; raw.set(objectKey,mime);
-        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp: new Date().toISOString(), recipients: Array.isArray(to) ? to : [to], dmarcVerdict: { status: dmarc }, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
+        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp, recipients: Array.isArray(to) ? to : [to], ...(dmarc ? {dmarcVerdict:{status:dmarc}} : {}), dkimVerdict:{status:dkim}, spfVerdict:{status:verdicts.spf??'PASS'}, spamVerdict:{status:verdicts.spam??'PASS'}, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
         assert.equal(await acceptInboundNotification(runtime,input),1); assert.equal(await acceptInboundNotification(runtime,input),0);
         await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:receipt},{id:unique('job'),workspaceId:scope,attempts:1});
       }
@@ -6159,6 +6159,89 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const deliveredHeaders = outgoing.get(batch.data[0].id).Content.Simple.Headers;
       assert.deepEqual(deliveredHeaders.map((h:Json)=>h.Name),['X-Ticket','List-Unsubscribe','List-Unsubscribe-Post']);
       assert.equal(deliveredHeaders[0].Value,'42'); assert.match(deliveredHeaders[1].Value,/\/unsubscribe\/u_[a-f0-9]{64}>$/); assert.equal(deliveredHeaders[2].Value,'List-Unsubscribe=One-Click');
+
+      const seedSuppression = (email:string,reason:string,consent='unknown',at:string|null='2026-10-01',wid=scope) => db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason,suppressed_at,marketing_consent,updated_at)
+        VALUES($1,$2,$3,true,$4,$5,$6,CASE WHEN $5::timestamptz IS NULL THEN '2026-10-01'::timestamptz ELSE now() END)`,[unique('contact'),wid,email,reason,at,consent]);
+      await t.test('only authenticated From clears an older reversible workspace suppression, with a stored audit',async()=>{
+        const signature=(domain:string,headers='from:date')=>`DKIM-Signature: v=1; a=rsa-sha256; d=${domain}; s=fixture; h=${headers}; bh=YWJj; b=YWJj`;
+        const received='2026-10-15T12:00:00.000Z';
+        const cases: [string,string|null,string|undefined,string[],string,string|null,string,boolean][] = [
+          ['hard','PASS',undefined,[],'hard_bounce','2026-10-01','unknown',true],
+          ['validation','PASS',undefined,[],'email_validation',null,'subscribed',true], // pre-migration contact
+          ['dkim','GRAY','PASS',[signature('example.net')],'soft_bounce','2026-10-01','unknown',true],
+          ['dkim-absent-verdict',null,'PASS',[signature('example.net')],'hard_bounce','2026-10-01','unknown',true],
+          ['spoof','FAIL','PASS',[signature('example.net')],'email_validation','2026-10-01','unknown',false],
+          ['untrusted','GRAY','PASS',[signature('other.example'),'Authentication-Results: amazonses.com; dkim=pass header.d=example.net'],'hard_bounce','2026-10-01','unknown',false],
+          ['ambiguous','GRAY','PASS',[signature('other.example'),signature('example.net')],'hard_bounce','2026-10-01','unknown',false],
+          ['unsigned-from','GRAY','PASS',[signature('example.net','subject:date')],'hard_bounce','2026-10-01','unknown',false],
+          ['unsigned-date','GRAY','PASS',[signature('example.net','from:subject')],'hard_bounce','2026-10-01','unknown',false],
+          ['multi-from','PASS',undefined,['From: other@elsewhere.example'],'hard_bounce','2026-10-01','unknown',false],
+          ['envelope-only',null,undefined,[],'email_validation','2026-10-01','unknown',false],
+          ['complaint','PASS',undefined,[],'complaint','2026-10-01','unknown',false],
+          ['manual','PASS',undefined,[],'operator','2026-10-01','unknown',false],
+          ['optout','PASS',undefined,[],'email_validation','2026-10-01','unsubscribed',false],
+          ['newer','PASS',undefined,[],'hard_bounce','2026-10-15T12:01:00Z','unknown',false],
+          ['equal','PASS',undefined,[],'email_validation',received,'unknown',false],
+        ];
+        const otherScope=unique('workspace'); await seedSuppression('hard@example.net','hard_bounce','unknown',null,otherScope);
+        for (const [name,dmarc,dkim,extra,reason,at,consent,clear] of cases) {
+          const author=name+'@example.net';await seedSuppression(author,reason,consent,at);
+          await receive(address,mime(name,'Fixture',['Date: Thu, 15 Oct 2026 12:02:00 +0000',...extra]).replace('from@example.net',author),dmarc,dkim,received);
+          const [row]=(await db.query(`SELECT c.suppressed,c.suppression_reason,c.marketing_consent,e.data FROM audience_contacts c
+            JOIN mail_messages m ON m.workspace_id=c.workspace_id AND m.message_id=$2 JOIN mailbox_events e ON e.message_id=m.id AND e.type='message.stored'
+            WHERE c.workspace_id=$1 AND c.email=$2`,[scope,author])).rows;
+          assert.deepEqual([row.suppressed,row.suppression_reason,row.marketing_consent,row.data.clearedSuppressionReason],[!clear,clear?null:reason,consent,clear?reason:undefined],name);
+        }
+        assert.equal((await db.query('SELECT suppressed FROM audience_contacts WHERE workspace_id=$1',[otherScope])).rows[0].suppressed,true);
+      });
+      await t.test('receiving an old signed message again, forged dates, and spam cannot clear a suppression',async()=>{
+        const author='replayed@example.net', received='2026-10-15T12:00:00Z', fresh='Date: Thu, 15 Oct 2026 11:59:00 +0000', old='Date: Wed, 30 Sep 2026 10:00:00 +0000';
+        const sig='DKIM-Signature: v=1; a=rsa-sha256; d=example.net; s=fixture; h=from:date; bh=YWJj; b=YWJj';
+        await seedSuppression(author,'hard_bounce');
+        for(const [name,headers] of Object.entries({replay:[old,sig],equal:['Date: Thu, 01 Oct 2026 00:00:00 +0000',sig],missing:[sig],invalid:['Date: invalid',sig],future:['Date: Thu, 15 Oct 2026 12:05:01 +0000',sig],duplicate:[fresh,old,sig],unsigned:[fresh,sig.replace('h=from:date','h=from')],stripped:[fresh],spam:[fresh,sig]})) {
+          await receive(address,mime('replay-'+name,'Replay check',headers).replace('from@example.net',author),'PASS','PASS',received,{spf:'FAIL',spam:name==='spam'?'FAIL':'PASS'});
+          assert.equal((await db.query('SELECT suppressed FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[scope,author])).rows[0].suppressed,true,name);
+        }
+        await receive(address,mime('fresh-signed','Fresh reply',[fresh,sig]).replace('from@example.net',author),'PASS','PASS',received,{spf:'FAIL'});
+        assert.equal((await db.query('SELECT suppressed FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[scope,author])).rows[0].suppressed,false);
+      });
+      await t.test('thread replies bypass only validation for actual authors and report immutable failure reasons',async()=>{
+        const {syncOutboundMessages}=await import('./src/mailbox-send.js');
+        const author='validated@example.net', outsider='additional@example.net';
+        await receive(address,mime('actual-author','Recipient fixture',[]).replace('from@example.net',author),'PASS');
+        await seedSuppression(author,'email_validation'); await seedSuppression(outsider,'email_validation');
+        const parent=ok(await get(`${inbox}&q=Recipient`,agent)).data.find((m:Json)=>m.snippet==='Recipient fixture');
+        const respond=async(extra:Json={})=>ok(await post(`${base}/threads/${parent.threadId}/reply`,{addressId:box.id,replyToMessageId:parent.id,text:'Fixture',...extra},agent),202);
+        const hook=ok(await post(`${base}/webhooks`,{url:'https://example.com/failure',addressIds:[box.id],eventTypes:['message.failed']}),201);
+        const reply=await respond(), copied=await respond({bcc:[outsider]});
+        const ordinary=ok(await post('/v1/emails/send',{...plain,to:author,headers:[{name:'In-Reply-To',value:'<actual-author@example.net>'}]}),202);
+        await dispatchDue(runtime,REGION); assert.ok(outgoing.has(reply.emailId));assert.ok(!outgoing.has(copied.emailId) && !outgoing.has(ordinary.id));
+        assert.equal(ok(await get(`/v1/emails/${ordinary.id}`)).suppressionReason,'email_validation');
+        for (const [reason,consent,blockedBy] of [['hard_bounce','unknown','hard_bounce'],['complaint','unknown','complaint'],['email_validation','unsubscribed','email_validation']]) {
+          await db.query('UPDATE audience_contacts SET suppression_reason=$3,marketing_consent=$4 WHERE workspace_id=$1 AND email=$2',[scope,author,reason,consent]);
+          const blocked=await respond();await dispatchDue(runtime,REGION);assert.ok(!outgoing.has(blocked.emailId));
+          assert.equal(ok(await get(`/v1/emails/${blocked.emailId}`)).suppressionReason,blockedBy);
+        }
+        await db.query(`UPDATE audience_contacts SET suppressed=false,suppression_reason=NULL,suppressed_at=NULL WHERE workspace_id=$1 AND email=$2 AND marketing_consent='unsubscribed'`,[scope,author]);
+        const optedOut=await respond();await dispatchDue(runtime,REGION);assert.ok(outgoing.has(optedOut.emailId),'Marketing opt-out alone must not block a transactional reply.');
+        await db.query('UPDATE audience_contacts SET suppressed=false,suppression_reason=NULL WHERE workspace_id=$1 AND email=$2',[scope,outsider]);
+        await syncOutboundMessages(runtime);
+        const mail=ok(await get(`/v1/emails/${copied.emailId}/detail`)), message=ok(await get(`${base}/messages/${copied.id}`,agent));
+        for(const row of [mail.email,message]) assert.deepEqual([row.status,row.errorCode,row.suppressionReason],['suppressed','RECIPIENT_INELIGIBLE','email_validation']);
+        assert.equal(mail.events.data.find((e:Json)=>e.type==='suppressed').data.suppressionReason,'email_validation');
+        const delivery=(await db.query(`SELECT payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2`,[hook.id,copied.id])).rows[0];
+        assert.equal(delivery.payload.data.suppressionReason,'email_validation');
+      });
+      await t.test('spam and unverified deliveries cannot qualify their author for the thread reply exemption',async()=>{
+        for(const [name,dmarc,spam] of [['junk','PASS','FAIL'],['held','GRAY','PASS']]) {
+          const author=name+'@example.net';await seedSuppression(author,'email_validation');
+          await receive(address,mime(name+'-injected','Injected '+name,['In-Reply-To: <actual-author@example.net>']).replace('from@example.net',author),dmarc,undefined,undefined,{spam});
+          const parent=ok(await get(`${inbox}&q=Injected`,agent)).data.find((m:Json)=>m.snippet==='Injected '+name);
+          const reply=ok(await post(`${base}/threads/${parent.threadId}/reply`,{addressId:box.id,replyToMessageId:parent.id,text:'Fixture'},agent),202);
+          await dispatchDue(runtime,REGION); const mail=ok(await get(`/v1/emails/${reply.emailId}`));
+          assert.deepEqual([outgoing.has(reply.emailId),mail.status,mail.suppressionReason],[false,'suppressed','email_validation'],name);
+        }
+      });
     });
   });
 

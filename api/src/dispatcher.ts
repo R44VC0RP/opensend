@@ -212,7 +212,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
   // MX lane only, run the SAME durable claim on the locked fair selection. Both UPDATEs below
   // are disjoint: Postgres must never update the same email twice in one WITH statement.
   const simple = inline && sql`SELECT e.id,e.workspace_id,e.dispatch_version,e.campaign_id,e.actor_key_id,lower(e.snapshot->>'from') AS sender,
-      false AS mcp_allowed,s.connection->>'feedback_topic_arn' AS feedback_topic,e.snapshot->'binding' AS binding,jsonb_build_array(lower(e.snapshot#>>'{to,0}')) AS destinations,false AS marketing,
+      false AS mcp_allowed,s.connection->>'feedback_topic_arn' AS feedback_topic,e.snapshot->'binding' AS binding,jsonb_build_array(lower(e.snapshot#>>'{to,0}')) AS destinations,false AS marketing,e.snapshot->'replyAuthors' AS reply_authors,
       NULL::jsonb AS snapshot,NULL::text AS token_hash,NULL::text AS token_email,${id('event')}::text AS event_id,
       'attempt-start:'||e.id||':'||e.dispatch_version AS external_id,e.dispatch_version+1 AS attempt
     FROM selected e JOIN settings s ON s.workspace_id=e.workspace_id AND s.stream=e.snapshot->>'kind'
@@ -430,12 +430,12 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
     id: item.mail.id, workspace_id: item.mail.workspaceId, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
     actor_key_id: item.mail.actorKeyId, sender: item.snapshot.from.toLowerCase(), mcp_allowed: item.mail.actorKeyId.startsWith('mcp_') && origins.get(mcpOrigin(item)) === true,
     feedback_topic: item.owner.feedbackTopic, binding:item.stored?.binding ?? item.mail.snapshot.binding, destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
-    marketing: item.snapshot.kind === 'marketing', snapshot: item.unsubscribe ? item.stored ?? null : null,
+    marketing: item.snapshot.kind === 'marketing', reply_authors: item.snapshot.replyAuthors, snapshot: item.unsubscribe ? item.stored ?? null : null,
     token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null,
     event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
   }));
   const rows = sql`SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
-        AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)`;
+        AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, reply_authors jsonb, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)`;
   const claimed = await db.execute<{ id: string; status: EmailStatus }>(sql`WITH ${claimCtes(runtime, prepared[0]!.mail.region, rows)} SELECT id, status FROM claimed`);
   return new Map(claimed.rows.map(row => [row.id, row.status]));
 }
@@ -447,9 +447,9 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
     ), campaign_state AS MATERIALIZED (
       SELECT id, workspace_id, state FROM sending_campaigns WHERE (workspace_id, id) IN (SELECT workspace_id, campaign_id FROM input WHERE campaign_id IS NOT NULL) FOR SHARE
     ), dest AS (
-      SELECT x.id AS email_id, x.workspace_id, d.value AS email FROM input x, jsonb_array_elements_text(x.destinations) d
+      SELECT x.id AS email_id, x.workspace_id, d.value AS email, d.n FROM input x, jsonb_array_elements_text(x.destinations) WITH ORDINALITY d(value,n)
     ), consent AS MATERIALIZED (
-      SELECT workspace_id, email, suppressed, deleted_at, marketing_consent FROM audience_contacts
+      SELECT workspace_id, email, suppressed, suppression_reason, deleted_at, marketing_consent FROM audience_contacts
       WHERE (workspace_id, email) IN (SELECT workspace_id, email FROM dest)
       ORDER BY id FOR UPDATE
     ), eligibility AS MATERIALIZED (
@@ -470,19 +470,26 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
             AND r.connection IS NOT NULL AND r.connection->>'paused_at' IS NULL AND (r.connection->>'kind'='byo' OR ${isSimulatedSes(runtime)} OR r.connection->>'tenant_state'='ready')
             AND r.connection->>'feedback_topic_arn' IS NOT DISTINCT FROM x.feedback_topic) END` : sql`true`} AS binding_ok,
         (x.campaign_id IS NULL OR EXISTS (SELECT 1 FROM campaign_state c WHERE c.workspace_id = x.workspace_id AND c.id = x.campaign_id AND c.state <> 'canceled')) AS campaign_allowed,
-        NOT EXISTS (SELECT 1 FROM dest d LEFT JOIN consent c USING (workspace_id, email)
-          WHERE d.email_id = x.id AND (c.suppressed IS TRUE OR (x.marketing AND (c.email IS NULL OR c.deleted_at IS NOT NULL OR c.marketing_consent <> 'subscribed')))) AS recipient_allowed
+         (SELECT cause.reason FROM dest d LEFT JOIN consent c USING (workspace_id,email)
+          CROSS JOIN LATERAL (SELECT CASE
+            WHEN x.marketing AND c.marketing_consent='unsubscribed' THEN 'unsubscribed'
+            WHEN c.suppressed AND NOT coalesce(NOT x.marketing AND c.suppression_reason='email_validation'
+              AND c.marketing_consent<>'unsubscribed' AND x.reply_authors ? d.email,false) THEN coalesce(c.suppression_reason,'suppressed')
+            WHEN x.marketing AND c.deleted_at IS NOT NULL THEN 'contact_deleted'
+            WHEN x.marketing AND c.marketing_consent IS DISTINCT FROM 'subscribed' THEN 'consent_missing' END AS reason) cause
+          WHERE d.email_id=x.id AND cause.reason IS NOT NULL ORDER BY d.n LIMIT 1) AS suppression_reason
       FROM input x
     ), claimed AS (
       UPDATE sending_emails e SET simulated = ${isSimulatedSes(runtime)},
-        status = CASE WHEN NOT el.origin_ok OR NOT el.binding_ok OR NOT el.campaign_allowed THEN 'canceled' WHEN el.recipient_allowed THEN 'attempting' ELSE 'suppressed' END,
-        attempt_started_at = CASE WHEN el.origin_ok AND el.binding_ok AND el.campaign_allowed AND el.recipient_allowed THEN clock_timestamp() ELSE e.attempt_started_at END,
-        error_code = CASE WHEN NOT el.binding_ok AND x.binding IS NOT NULL THEN 'SENDER_BINDING_CHANGED' WHEN NOT el.origin_ok OR NOT el.binding_ok THEN 'ORIGIN_KEY_REVOKED' WHEN NOT el.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN el.recipient_allowed THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
+        status = CASE WHEN NOT el.origin_ok OR NOT el.binding_ok OR NOT el.campaign_allowed THEN 'canceled' WHEN el.suppression_reason IS NULL THEN 'attempting' ELSE 'suppressed' END,
+        attempt_started_at = CASE WHEN el.origin_ok AND el.binding_ok AND el.campaign_allowed AND el.suppression_reason IS NULL THEN clock_timestamp() ELSE e.attempt_started_at END,
+        error_code = CASE WHEN NOT el.binding_ok AND x.binding IS NOT NULL THEN 'SENDER_BINDING_CHANGED' WHEN NOT el.origin_ok OR NOT el.binding_ok THEN 'ORIGIN_KEY_REVOKED' WHEN NOT el.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN el.suppression_reason IS NULL THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
+        suppression_reason = CASE WHEN el.origin_ok AND el.binding_ok AND el.campaign_allowed THEN el.suppression_reason END,
         ${runtime.config.multiTenant && !isSimulatedSes(runtime) ? sql`feedback_topic_arn=x.feedback_topic,` : sql``} snapshot = coalesce(x.snapshot, e.snapshot), lease_until = NULL, updated_at = clock_timestamp()
       FROM input x JOIN eligibility el ON el.id = x.id
       WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.status = 'queued' AND e.dispatch_version = x.dispatch_version
         ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id=x.workspace_id AND pc.paused_at IS NULL FOR SHARE)` : sql``}
-      RETURNING e.id, e.workspace_id, e.status
+      RETURNING e.id, e.workspace_id, e.status, e.suppression_reason
     ), token AS (
       INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, email)
       SELECT x.token_hash, c.workspace_id, x.token_email FROM claimed c JOIN input x ON x.id = c.id WHERE x.token_hash IS NOT NULL AND c.status = 'attempting'
@@ -493,8 +500,8 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
         jsonb_build_object('attempt', x.attempt, 'providerCallPlanned', true, 'providerCallSimulated', ${isSimulatedSes(runtime)}::boolean), clock_timestamp()
       FROM claimed c JOIN input x ON x.id = c.id WHERE c.status = 'attempting' ON CONFLICT DO NOTHING
     ), suppressed AS (
-      INSERT INTO sending_email_events(id, workspace_id, email_id, type, external_id, simulated)
-      SELECT x.event_id, c.workspace_id, c.id, 'suppressed', 'suppressed:' || c.id, ${isSimulatedSes(runtime)}::boolean
+      INSERT INTO sending_email_events(id, workspace_id, email_id, type, external_id, simulated,data)
+      SELECT x.event_id, c.workspace_id, c.id, 'suppressed', 'suppressed:' || c.id, ${isSimulatedSes(runtime)}::boolean,jsonb_build_object('suppressionReason',c.suppression_reason)
       FROM claimed c JOIN input x ON x.id = c.id WHERE c.status = 'suppressed' ON CONFLICT DO NOTHING
     )`;
 }
